@@ -1,0 +1,544 @@
+---
+title: "Radical Redistribution - 2019 - Version 1"
+author: "Asher Dvir-Djerassi"
+date: "09/08/2022"
+output: html_document
+---
+
+# Header 
+```{r, include = FALSE}
+# packages and libraries,
+#install.packages("shinythemes", "highcharter",  "reldist", "coda", "kdensity", "reldist", "plotrix", "directlabels", "sjlabelled", "blscrapeR", "ggpubr")
+#detach(package:plyr) #group by does not work if this is operating
+library("ggpubr")
+library("coda")
+library("shinythemes")
+library("highcharter")
+library("scales")
+library("RColorBrewer")
+library("ggthemes")
+library("ggplot2")
+library("grid")
+library("markdown")
+library("ggExtra")
+library("devtools")
+library("readxl")   #for reading xlsx files
+library("reldist")  #for computing weighted statistics
+library("dplyr")
+library("kableExtra")
+library("kdensity")
+library("plotrix")
+library("reshape2")
+library("tidyr")
+library("Hmisc")
+library("haven") # import dta files into r
+library("directlabels") # label ggplot in plot
+library("sjlabelled")
+library("cowplot")
+
+system("mkdir 1.output") # Note: system calls the OS.
+
+```
+
+############################################################
+######################  Maximin 2019 #######################
+############################################################
+
+# Load data: 2019
+```{r, include=FALSE}
+
+options(scipen=999) # this remove scientific notation from R output
+
+#############################
+######### Load SCF ##########
+#############################
+
+scf <- read.csv("scf.csv", header = TRUE, row.names = 1) 
+scf <- subset(scf, YEAR == 2019)
+
+#############################
+##### Load Forbes 400  ######
+#############################
+
+forbes_400 <- read.csv("forbes_400.csv", header = TRUE)
+forbes_400 <- subset(forbes_400, forbes_400$YEAR == 2019)
+
+#############################
+### Merge Forbes & SCF  #####
+#############################
+
+# create forbes indicator
+forbes_400$Forbes_indicator <- 1
+scf$Forbes_indicator <- 0
+
+# create empty name variable in scf
+scf$name <- NA
+
+# keep only networth in 2019 USD
+forbes_400$NETWORTH <- forbes_400$NETWORTH_2019
+forbes_400$NETWORTH_2019 <- NULL
+
+# race - unknown
+forbes_400$RACE <- NA
+
+# age - 999 - unknown
+forbes_400$AGE <- 999
+
+scf <- dplyr::bind_rows(scf, forbes_400[c("NETWORTH","YEAR","WGT", "RACE", "AGE", "Forbes_indicator", "name")])
+```
+
+# Wealth tax function 
+```{r}
+wealth_tax_function_2019 <- function(threshold, tax_rate){
+ 
+  ############# AGGREGATES TABLE #################
+  
+  aggregates <- data.frame(matrix (nrow = 1, ncol = 0, byrow = 1))
+  
+  ####### taxable wealth #########
+  aggregates[,"Taxable Wealth"] <-
+    sum((subset(scf$NETWORTH, scf$NETWORTH >= threshold)-threshold)*subset(scf$WGT, scf$NETWORTH >= threshold))
+  
+  ####### tax threshold #########
+  aggregates[,"Tax Threshold"] <- threshold
+  
+  ####### tax rate #########
+  aggregates[,"Tax Rate"] <- tax_rate
+  
+  ###### Total wealth tax revenue ######
+  aggregates[,"Wealth Tax Revenue"] <-
+    aggregates[,"Taxable Wealth"] *
+    aggregates[, "Tax Rate"]
+  
+  ###### US Population ######
+  aggregates$us_population <- c(328239523)
+  
+  aggregates[, "Wealth Endowment Per Person"] <-
+    aggregates[, "Wealth Tax Revenue"]/
+    aggregates[, "us_population"]
+  
+  ###### US Population ######
+  aggregates$us_households <- sum(scf$WGT)
+  
+  aggregates[, "Wealth Endowment Per Household"] <-
+    aggregates[, "Wealth Tax Revenue"]/
+    aggregates[, "us_households"]
+ 
+  ############# FUNCTION OUTPUT #################
+  return(aggregates)
+}
+```
+
+# Run wealth tax function
+```{r, include=FALSE}
+#################################
+######## hyperparameters ########
+#################################
+
+# set taxable threshold
+threshold = 1000000000
+
+# set tax rate
+tax_rate = 1
+
+#################################
+######## Run Function #########
+#################################
+
+aggregates <- wealth_tax_function_2019(threshold, tax_rate)
+```
+
+# Maximin for households in 2019
+```{r}
+# tax revenue to redistribute
+total_tax_revenue <- aggregates$`Wealth Tax Revenue`
+total_redistribution <- 0
+
+# create df that is equal to 2019 SCF with Forbes 400
+df <- scf
+
+# this is not used, bc unit of analysis is household
+# make NA hhsize into 1 - these are the Forbes 400
+df$HHSIZE <- ifelse(is.na(df$HHSIZE), 1, df$HHSIZE)
+
+# rename networth
+df$networth <- df$NETWORTH
+
+# create post_transfer_networth
+df$post_transfer_networth <- df$NETWORTH
+
+# create wealth transfer vector changes in every iteration
+df$transfer_temp <- 0
+
+while(total_tax_revenue > total_redistribution){
+      
+    # if the total transfer is less than or equal to what is left to be redistributed, then do this
+    if(
+      sum(
+        ifelse(
+                    # if post_transfer_networth is equal to minimum wealth
+                    df$post_transfer_networth == sort(subset(df$post_transfer_networth,
+                                df$post_transfer_networth == sort(df$post_transfer_networth)[1]))[1],
+                    # then transfer difference with next wealthiest household 
+                    sort(subset(df$post_transfer_networth,
+                                df$post_transfer_networth > sort(df$post_transfer_networth)[1]))[1] -
+                                sort(df$post_transfer_networth)[1],
+                    # otherwise 
+                    0)
+              # multiply output by sample weight
+              *df$WGT) 
+      # if amount is less than the remaining tax revenue to distribute
+      <= (total_tax_revenue - total_redistribution)
+      )
+      
+    # then add  transfer 
+      {
+        df$transfer_temp <-
+          ifelse(
+                      # if post_transfer_networth is equal to the lowest wealth
+                      df$post_transfer_networth == sort(df$post_transfer_networth)[1], 
+                      # transfer amount is equal to the next wealthiest hh minus the poorest
+                      sort(subset(df$post_transfer_networth,
+                                  df$post_transfer_networth > sort(df$post_transfer_networth)[1]))[1] -
+                                  sort(df$post_transfer_networth)[1],
+                      # otherwise transfer 0
+                      0)
+    # otherwise transfer is remaining tax revenue divided by number of eligible households
+    }else{
+      
+      # identify those receiving and not receiving transfer
+      df$number_to_receive_transfer <- 
+        df$post_transfer_networth == sort(subset(df$post_transfer_networth,
+                    df$post_transfer_networth == sort(df$post_transfer_networth)[1]))[1]
+      
+      # count number receiving transfer
+      number_to_receive_transfer <- 
+                    sum(subset(df$WGT, df$number_to_receive_transfer == TRUE))
+      
+      # transfer equals remaining tax revenue available divided by number eligible to receive
+      df$transfer_temp <- 
+        ifelse(
+                   # if equal to the wealth of the poorest 
+                   df$post_transfer_networth == sort(df$post_transfer_networth)[1],
+                   # transfer amount
+                   (total_tax_revenue - total_redistribution)/number_to_receive_transfer,
+                   # if not, no transfer
+                   0)
+    }
+   
+    # create df_temp 
+    
+      df_temp <- df
+      
+        # update post_transfer_networth
+        df_temp$post_transfer_networth <- 
+          df_temp$post_transfer_networth + df_temp$transfer
+        
+        # calculate total transfer
+        temp_total_redistribution <- 
+          sum((df_temp$post_transfer_networth - df_temp$networth)*df_temp$WGT)
+
+    if(total_tax_revenue > temp_total_redistribution){
+    
+      # update post_transfer_networth
+       df$post_transfer_networth <- 
+        df$post_transfer_networth + df$transfer_temp
+      
+      # calculate total transfer
+       total_redistribution <- 
+        sum((df$post_transfer_networth - df$networth)*df$WGT)
+     
+    } else{ 
+      
+      #set total redistribution equal to total tax revenue in order to stop the loop
+      total_redistribution <- total_tax_revenue
+      
+    }
+}
+```
+
+# Maximin output
+```{r}
+
+#############################
+########## Table 1 ##########
+#############################
+
+maximin_ouput <- data.frame(matrix (nrow = 1, ncol = 0, byrow = 1))
+
+# post tax net worth
+df$post_tax_networth <- df$NETWORTH 
+df$post_tax_networth[df$NETWORTH > threshold] <- threshold
+
+# post tax and transfer net worth
+df$post_tax_transfer_networth <- df$post_transfer_networth 
+df$post_tax_transfer_networth[df$post_tax_transfer_networth >= threshold] <- 
+  threshold+(subset(df$NETWORTH, df$NETWORTH >= threshold) - threshold)*(1-tax_rate)
+
+# calculate total transfer per household
+df$total_transfer <- (df$post_transfer_networth - df$networth)
+maximin_ouput[,"Total wealth redistributed"] <- sum(df$total_transfer*df$WGT)
+
+# guaranteed minimum wealth
+maximin_ouput[,"Guaranteed Minimum Wealth"] <-  min(df$post_transfer_networth)
+
+# number of households at or below the post-transfer wealth floor
+maximin_ouput[,"Number of households at or below wealth floor"] <- 
+  comma(sum(subset(scf$WGT, scf$NETWORTH <= min(df$post_transfer_networth))))
+
+# number of people at or below the post-transfer wealth floor
+maximin_ouput[,"Number of people at or below wealth floor"] <- 
+  comma(sum(subset(scf$WGT*scf$HHSIZE, scf$NETWORTH <= min(df$post_transfer_networth))))
+
+# number of household at or above $1 billion
+maximin_ouput[,"Number of households with $1 billion or more"] <- 
+  comma(sum(subset(scf$WGT, scf$NETWORTH >= 1000000000)))
+
+# Bottom 50% share
+maximin_ouput[,"Observed 50% share"] <- 
+  sum(subset(df$NETWORTH*df$WGT, df$NETWORTH <= wtd.quantile(df$NETWORTH, c(.50), weight = df$WGT)))/
+      sum(df$NETWORTH*df$WGT)
+
+maximin_ouput[,"Post-tax bottom 50% share"] <- 
+  sum(subset(df$post_tax_networth*df$WGT, df$NETWORTH <= wtd.quantile(df$NETWORTH, c(.50), weight = df$WGT)))/
+      sum(df$post_tax_networth*df$WGT)
+
+maximin_ouput[,"Post-tax and transfer bottom 50% share"] <- 
+  sum(subset(df$post_tax_transfer_networth*df$WGT, 
+             df$NETWORTH <= wtd.quantile(df$NETWORTH, c(.50), weight = df$WGT)))/
+      sum(df$post_tax_transfer_networth*df$WGT)
+
+# Top 10%
+maximin_ouput[,"Observed 10% share"] <- 
+  sum(subset(df$NETWORTH*df$WGT, df$NETWORTH >= wtd.quantile(df$NETWORTH, c(.90), weight = df$WGT)))/
+      sum(df$NETWORTH*df$WGT)
+
+maximin_ouput[,"Post-tax top 1% share"] <- 
+  sum(subset(df$post_tax_networth*df$WGT, df$NETWORTH >= wtd.quantile(df$NETWORTH, c(.90), weight = df$WGT)))/
+      sum(df$post_tax_networth*df$WGT)
+
+maximin_ouput[,"Post-tax and transfer top 1% share"] <- 
+  sum(subset(df$post_tax_transfer_networth*df$WGT, 
+             df$NETWORTH >= wtd.quantile(df$NETWORTH, c(.90), weight = df$WGT)))/
+      sum(df$post_tax_transfer_networth*df$WGT)
+
+# Top 1%
+maximin_ouput[,"Observed 1% share"] <- 
+  sum(subset(df$NETWORTH*df$WGT, df$NETWORTH >= wtd.quantile(df$NETWORTH, c(.99), weight = df$WGT)))/
+      sum(df$NETWORTH*df$WGT)
+
+maximin_ouput[,"Post-tax top 1% share"] <- 
+  sum(subset(df$post_tax_networth*df$WGT, df$NETWORTH >= wtd.quantile(df$NETWORTH, c(.99), weight = df$WGT)))/
+      sum(df$post_tax_networth*df$WGT)
+
+maximin_ouput[,"Post-tax and transfer top 1% share"] <- 
+  sum(subset(df$post_tax_transfer_networth*df$WGT, 
+             df$NETWORTH >= wtd.quantile(df$NETWORTH, c(.99), weight = df$WGT)))/
+      sum(df$post_tax_transfer_networth*df$WGT)
+
+write.csv(maximin_ouput, "1.output/maximin_ouput.csv")
+
+#############################
+########## Table 2 ##########
+#############################
+
+maximin_quantiles <- as.data.frame(
+  rbind(
+    # Observed - All
+    wtd.quantile(df$NETWORTH, 
+                c(0, .08, .10, .19, .28, .36, .5, .61, .75), 
+               weight = df$WGT),
+    # Post tax and transfer - All
+    wtd.quantile(df$post_tax_transfer_networth,
+                 c(0, .08, .10, .19, .28, .36, .5, .61, .75), 
+                 weight = df$WGT),
+    # Observed - Black
+    wtd.quantile(subset(df$NETWORTH, df$RACE == "Black"), 
+                 c(0, .08, .10, .19, .28, .36, .5, .61, .75), 
+                  weight = subset(df$WGT, df$RACE == "Black")),
+    # Post tax and transfer - Black
+    wtd.quantile(subset(df$post_tax_transfer_networth, df$RACE == "Black"), 
+                 c(0, .08, .10, .19, .28, .36, .5, .61, .75), 
+                  weight = subset(df$WGT, df$RACE == "Black")),
+    # Observed - White
+    wtd.quantile(subset(df$NETWORTH, df$RACE == "White"), 
+                 c(0, .08, .10, .19, .28, .36, .5, .61, .75), 
+                weight = subset(df$WGT, df$RACE == "White")),
+    # Post tax and transfer - White
+    wtd.quantile(subset(df$post_tax_transfer_networth, df$RACE == "White"), 
+                 c(0, .08, .10, .19, .28, .36, .5, .61, .75), 
+                weight = subset(df$WGT, df$RACE == "White"))
+  )
+)
+
+rownames(maximin_quantiles) <- c("Observed - All", "Post-tax and transfer networth - All", "Observed - Black", "Post-tax and transfer networth - Black", "Observed - White", "Post-tax and transfer networth - White")
+
+write.csv(maximin_quantiles, "1.output/maximin_quantiles.csv")
+```
+
+# Graph maximin
+```{r}
+#########################
+##### Create Data  ######
+#########################
+
+df_quantiles <- data.frame(matrix (nrow = 101, ncol = 0, byrow = 1))
+df_quantiles$quantiles <-  c(seq(1, 100, by = 1), "Forbes 400")
+df_quantiles$quantiles[101] <- c("Forbes 400")
+
+# Forbes
+df_quantiles$"Forbes 400" <- 0
+df_quantiles$"Forbes 400"[101] <- min(subset(forbes_400$NETWORTH, forbes_400$YEAR == 2019))
+df_quantiles$Thresholds <- c(wtd.quantile(
+                              scf$NETWORTH,
+                              seq(.01, 1, by = .01), 
+                              weight = scf$WGT),NA)
+
+# guaranteed minimum wealth
+df_quantiles$post_gmw_quantiles <- c(wtd.quantile(
+                                      df$post_tax_transfer_networth,
+                                      seq(.01, 1, by = .01), 
+                                      weight = df$WGT),NA)
+
+# total net worth by quantile
+df_quantiles[1,"Total net worth"] <-  
+  sum(subset(scf$NETWORTH*scf$WGT, scf$NETWORTH <= df_quantiles$Thresholds[1]))
+
+for (i in 1:99) {
+  df_quantiles[i+1,"Total net worth"] <-  
+    sum(subset(scf$NETWORTH*scf$WGT, scf$NETWORTH > df_quantiles$Thresholds[i] &
+           scf$NETWORTH <= df_quantiles$Thresholds[i+1]))
+}
+
+# share of total net worth by quantile
+df_quantiles[,"Share of total net worth"] <-
+  df_quantiles$`Total net worth`/sum(df_quantiles$`Total net worth`, na.rm=TRUE)
+
+###############################################################
+
+# quantile at GMW 
+quantile_at_gmw <- max(as.numeric(subset(df_quantiles$quantiles, as.numeric(df_quantiles$post_gmw_quantiles) <= min(df$post_tax_transfer_networth))))
+
+# temp rename 
+df_quantiles$quantiles[101] <- c("101")
+
+# total net worth post-transfer by quantile
+df_quantiles[as.numeric(df_quantiles$quantiles) <= quantile_at_gmw, "Total post-gmw net worth"] <- 
+  aggregates$`Taxable Wealth`/quantile_at_gmw
+
+# re-institute naming
+df_quantiles$quantiles[101] <- c("Forbes 400")
+
+# Total post-gmw net worth
+for (i in quantile_at_gmw:100) {
+  df_quantiles[i+1,"Total post-gmw net worth"] <- 
+    sum(subset(df$post_tax_transfer_networth*df$WGT, 
+                 df$post_tax_transfer_networth > df_quantiles$post_gmw_quantiles[i] &
+                 df$post_tax_transfer_networth <= df_quantiles$post_gmw_quantiles[i+1]))
+}
+
+# Correct calculation of quantile_at_gmw+1 - This is a flawed procedure!!! 
+df_quantiles$`Total post-gmw net worth`[quantile_at_gmw+1] <- 
+  sum(subset(df$post_tax_transfer_networth*df$WGT, 
+                 df$post_tax_transfer_networth > min(df$post_tax_transfer_networth) &
+                 df$post_tax_transfer_networth <= df_quantiles$post_gmw_quantiles[quantile_at_gmw+1]))
+
+df_quantiles$`Total post-gmw net worth`[quantile_at_gmw+1] <- 
+  # Deficit of households in quantile_at_gmw+1
+    (sum(subset(df$WGT, df$post_tax_transfer_networth >
+                 df_quantiles$post_gmw_quantiles[quantile_at_gmw+1] &
+                 df$post_tax_transfer_networth <= df_quantiles$post_gmw_quantiles[quantile_at_gmw+2])) - 
+    sum(subset(df$WGT, df$post_tax_transfer_networth > min(df$post_tax_transfer_networth) &
+               df$post_tax_transfer_networth <= df_quantiles$post_gmw_quantiles[quantile_at_gmw+1])))*
+  # Times GMW
+    min(df$post_transfer_networth) +
+  # Plus wealth of households observed
+    df_quantiles$`Total post-gmw net worth`[quantile_at_gmw+1]
+
+# share of post tax and transfer total net worth by quantile
+df_quantiles[,"Share of post-tax and transfer total net worth"] <-
+  df_quantiles$`Total post-gmw net worth`/sum(df$post_tax_transfer_networth*df$WGT, na.rm=TRUE)
+
+```
+
+# Highcharter figures
+```{r}
+
+#########################
+## Highcharter Options ##
+#########################
+
+options(highcharter.theme = hc_theme_smpl(tooltip = list(valueDecimals = 0, thousandsSep = ',')))
+lang <- getOption("highcharter.lang")
+lang$numericSymbols <- c(" Thousand"," Million"," Billion"," Trillion")
+lang$thousandsSep <- ","
+options(highcharter.lang = lang)
+
+#########################
+#######  Figure 1 #######
+#########################
+
+highchart() %>%
+  hc_chart(type ="column",
+           barBorderWidth = 0) %>%
+  hc_title(text = "Wealth Thresholds by Percentile - Pre and Post Redistribution") %>%
+  hc_chart(zoomType = "x") %>%
+  hc_plotOptions(column = list(
+    dataLabels = list(enabled = FALSE),
+    #stacking = "normal",
+    grouping = FALSE,
+    groupPadding = .2,
+    pointPadding = 0,
+    pointWidth = 15,
+    padding = 1,
+    opacity = 1,
+    enableMouseTracking = TRUE)) %>% 
+  hc_yAxis_multiples(
+    list(title = list(text = "2019 USD")),
+    list(title = list(text = "2019 USD"),
+         opposite = TRUE)) %>%
+  hc_xAxis(categories = df_quantiles$quantiles) %>%
+  hc_add_series(data = round(df_quantiles$post_gmw_quantiles[1:99]), name = "<p style='font-size:15px; color:black'>Guaranteed Minimum Wealth</p>", color = "red", showInLegend = TRUE, visible = FALSE) %>%
+  hc_add_series(data = round(df_quantiles$Thresholds[1:99]), name = "Wealth thresholds", color = "grey", showInLegend = FALSE, visible = TRUE) %>%
+  hc_xAxis(title = list(text = "Wealth percentiles")) %>%
+  hc_legend(
+    align = "right",
+    verticalAlign = "top"  
+    ) %>%
+  hc_exporting(enabled = TRUE)
+
+
+#########################
+#######  Figure 2 #######
+#########################
+
+highchart() %>%
+  hc_chart(type ="column",
+           barBorderWidth = 0) %>%
+  hc_title(text = "Wealth Thresholds by Percentile - Pre and Post Redistribution") %>%
+  hc_chart(zoomType = "x") %>%
+  hc_plotOptions(column = list(
+    dataLabels = list(enabled = FALSE),
+    #stacking = "normal",
+    grouping = TRUE,
+    groupPadding = 0,
+    pointPadding = 0,
+    pointWidth = 10,
+    padding = 0,
+    opacity = 1,
+    enableMouseTracking = TRUE)) %>% 
+  hc_yAxis_multiples(
+    list(title = list(text = "2019 USD")),
+    list(title = list(text = "2019 USD"),
+         opposite = TRUE)) %>%
+  hc_xAxis(categories = df_quantiles$quantiles, max = 100) %>%
+  hc_add_series(data = round(df_quantiles$`Share of total net worth`, 3), name = "Wealth thresholds", color = "grey", showInLegend = FALSE, visible = TRUE) %>%
+  hc_add_series(data = round(df_quantiles$`Share of post-tax and transfer total net worth`, 5), name = "Wealth thresholds", color = "red", showInLegend = FALSE, visible = TRUE) %>%
+  hc_xAxis(title = list(text = "Wealth percentiles")) %>%
+  hc_legend(
+    align = "right",
+    verticalAlign = "top"  
+    ) %>%
+  hc_exporting(enabled = TRUE)
+```
+
